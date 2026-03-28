@@ -1,5 +1,7 @@
-fastmcp>=3.1.0
+fastmcp>=0.4.1
 mcp>=1.2.0
+uvicorn>=0.34.0
+starlette>=0.45.0
 google-genai
 pymupdf
 python-dotenv
