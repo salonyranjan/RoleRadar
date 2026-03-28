@@ -1,7 +1,10 @@
 import os
 import json
 import logging
-from mcp.server.fastmcp import FastMCP
+try:
+    from fastmcp import FastMCP
+except ImportError:
+    from mcp.server.fastmcp import FastMCP
 from src.job_api import fetch_linkedin_jobs, fetch_naukri_jobs
 
 # 1. Initialize FastMCP with your server identity
