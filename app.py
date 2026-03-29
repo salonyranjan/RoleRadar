@@ -2,17 +2,22 @@ import streamlit as st
 import os
 import io
 import time
+import json
+import asyncio
 from dotenv import load_dotenv
 
-# PDF Generation imports
+# MCP & SSE Connection Protocol
+from mcp import ClientSession
+from mcp.client.sse import sse_client
+
+# Professional Reporting
 from reportlab.lib.pagesizes import LETTER
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.enums import TA_LEFT
 
-# RoleRadar Internal Modules
+# RoleRadar Internal Core
 from src.helper import extract_text_from_pdf, get_role_radar_analysis
-from src.job_api import fetch_linkedin_jobs, fetch_naukri_jobs
 
 # Load Environment Variables
 load_dotenv()
@@ -25,7 +30,16 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# --- Modern UI Styling ---
+# --- Session State Persistence ---
+# This ensures data survives browser refreshes and external redirects
+if 'analysis' not in st.session_state:
+    st.session_state.analysis = None
+if 'linkedin_jobs' not in st.session_state:
+    st.session_state.linkedin_jobs = []
+if 'naukri_jobs' not in st.session_state:
+    st.session_state.naukri_jobs = []
+
+# --- Custom UI Styling ---
 st.markdown("""
     <style>
     .main { background-color: #0e1117; color: #c9d1d9; }
@@ -38,34 +52,40 @@ st.markdown("""
         transition: transform 0.2s, border-color 0.2s;
     }
     .job-card:hover { 
-        transform: translateY(-3px); 
+        transform: translateY(-3.5px); 
         border-color: #58a6ff; 
-        box-shadow: 0px 4px 15px rgba(0,0,0,0.3);
+        box-shadow: 0px 4px 20px rgba(0,0,0,0.4);
     }
-    .stButton>button { width: 100%; border-radius: 8px; font-weight: bold; }
+    .stButton>button { width: 100%; border-radius: 8px; font-weight: bold; background-color: #238636; color: white; }
     .stDownloadButton>button { width: 100%; border-radius: 8px; }
     </style>
     """, unsafe_allow_html=True)
 
-# --- Professional PDF Generator ---
+# --- MCP Intelligence Bridge ---
+async def fetch_market_data(query):
+    """Securely communicates with the Render Intelligence Server."""
+    url = st.secrets.get("MCP_SERVER_URL", "https://roleradar-8753.onrender.com/sse")
+    try:
+        # sse_client handles the 'text/event-stream' handshake automatically
+        async with sse_client(url) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                # Trigger the 'global_market_scan' tool on your Render server
+                result = await session.call_tool("global_market_scan", arguments={"query": query})
+                # Parse the tool's content (which returns a JSON string)
+                return json.loads(result.content[0].text)
+    except Exception as e:
+        st.error(f"📡 Intelligence Server Connection Failed: {e}")
+        return None
+
+# --- PDF Export Engine ---
 def generate_pdf_report(analysis):
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=LETTER)
     styles = getSampleStyleSheet()
+    custom_style = ParagraphStyle('CustomNormal', parent=styles['Normal'], fontSize=10, leading=14, alignment=TA_LEFT)
     
-    # Custom style for wrapped text
-    custom_style = ParagraphStyle(
-        'CustomNormal',
-        parent=styles['Normal'],
-        fontSize=10,
-        leading=14,
-        alignment=TA_LEFT
-    )
-    
-    story = []
-    story.append(Paragraph("📡 RoleRadar: Career Intelligence Report", styles['Title']))
-    story.append(Spacer(1, 20))
-
+    story = [Paragraph("📡 RoleRadar: Career Intelligence Report", styles['Title']), Spacer(1, 20)]
     sections = [
         ("📑 Professional Summary", analysis.get('summary', 'N/A')),
         ("🛠️ Strategic Skill Gaps", analysis.get('gaps', 'N/A')),
@@ -74,16 +94,14 @@ def generate_pdf_report(analysis):
 
     for title, text in sections:
         story.append(Paragraph(title, styles['Heading2']))
-        # Clean text for PDF compatibility
-        clean_text = str(text).replace('\n', '<br/>')
-        story.append(Paragraph(clean_text, custom_style))
+        story.append(Paragraph(str(text).replace('\n', '<br/>'), custom_style))
         story.append(Spacer(1, 15))
 
     doc.build(story)
     buffer.seek(0)
     return buffer
 
-# --- Sidebar: Control & Branding ---
+# --- Sidebar: branding & Controls ---
 with st.sidebar:
     st.title("📡 RoleRadar")
     st.status("Model: Gemini 2.5 Flash", state="complete")
@@ -91,129 +109,113 @@ with st.sidebar:
     st.divider()
     st.markdown("### 👤 Candidate Profile")
     st.caption("Lead Dev: Salony Ranjan")
-    st.caption("Environment: 2026 Stable")
+    st.caption("Location: Patna, Bihar")
     
-    if st.button("🔄 Clear Session"):
+    if st.button("🔄 Clear Analysis & Reset"):
         st.session_state.clear()
         st.rerun()
 
-# --- Main App Header ---
+# --- Main Dashboard ---
 st.title("📡 Context-Aware Job Discovery")
-st.write("Leveraging **Gemini 2.5** to bridge the gap between your resume and the 2026 job market.")
+st.write("Leveraging **Agentic AI** to sync your resume with the live 2026 job market.")
 
-# --- File Upload & Processing Logic ---
+# --- Upload Logic ---
 uploaded_file = st.file_uploader("Upload Resume (PDF)", type=["pdf"], key="resume_uploader")
 
 if uploaded_file:
-    # 1. Process PDF and Cache Analysis
-    if 'analysis' not in st.session_state:
+    # 1. AI Analysis Phase
+    if st.session_state.analysis is None:
         with st.status("📡 Initializing Radar Scan...", expanded=True) as status:
             try:
                 st.write("Extracting resume context...")
                 resume_text = extract_text_from_pdf(uploaded_file)
                 
                 if not resume_text.strip():
-                    st.error("Could not extract text. Please check if the PDF is scanned as an image.")
+                    st.error("Empty PDF. Please check your file.")
                     st.stop()
 
-                st.write("Synthesizing Intelligence...")
+                st.write("Synthesizing Intelligence with Gemini...")
                 analysis_data = get_role_radar_analysis(resume_text)
                 
                 if "error" in analysis_data:
                     status.update(label="❌ API Rate Limit", state="error")
-                    st.error("Gemini is currently throttled. Please try again in 30 seconds.")
-                    st.stop()
+                    st.error("Gemini is throttled. Waiting 30s...")
+                    time.sleep(30)
+                    st.rerun()
                 
                 st.session_state.analysis = analysis_data
                 status.update(label="✅ Analysis Synced!", state="complete", expanded=False)
             except Exception as e:
-                st.error(f"An unexpected error occurred: {e}")
+                st.error(f"System Error: {e}")
                 st.stop()
 
-    # Reference the analysis
+    # 2. Results Dashboard
     analysis = st.session_state.analysis
-
-    # 2. Insights Dashboard
     st.divider()
     col_main, col_stats = st.columns([2, 1], gap="large")
 
     with col_main:
         st.subheader("📑 Professional Summary")
         st.info(analysis.get('summary', 'No summary generated.'))
-        
         st.subheader("🚀 6-Month Strategic Roadmap")
         st.success(analysis.get('roadmap', 'No roadmap generated.'))
 
     with col_stats:
         st.subheader("🛠️ Skill Gaps")
         st.warning(analysis.get('gaps', 'No gaps identified.'))
-        
-        st.subheader("📄 Export Insights")
+        st.subheader("📄 Export Report")
         pdf_data = generate_pdf_report(analysis)
         st.download_button(
             label="📥 Download PDF Report",
             data=pdf_data,
-            file_name=f"RoleRadar_{int(time.time())}.pdf",
+            file_name=f"RoleRadar_Report.pdf",
             mime="application/pdf"
         )
 
-    # 3. Live Job Search Engine
+    # 3. Job Search Engine (MCP Interaction)
     st.divider()
     st.header("🔎 Live Market Match")
     
-    # Handle keywords (ensure it's a searchable string)
+    # Extract search query from AI keywords
     raw_keywords = analysis.get('keywords', 'Software Engineer')
     query = ", ".join(raw_keywords) if isinstance(raw_keywords, list) else raw_keywords
 
     if st.button("🚀 Execute Global Job Scan", type="primary"):
-        with st.spinner(f"Searching for: {query}..."):
-            # Execute fetching (wrapped in try-except for API safety)
-            try:
-                linkedin_results = fetch_linkedin_jobs(query, rows=10)
-                naukri_results = fetch_naukri_jobs(query, rows=10)
-                
-                st.session_state.linkedin_jobs = linkedin_results
-                st.session_state.naukri_jobs = naukri_results
-            except Exception as e:
-                st.error(f"Search failed: {e}")
+        with st.spinner(f"🔍 AI is scanning market for: {query}..."):
+            market_data = asyncio.run(fetch_market_data(query))
+            if market_data:
+                st.session_state.linkedin_jobs = market_data.get("linkedin", [])
+                st.session_state.naukri_jobs = market_data.get("naukri", [])
+                st.success("✅ Market Intelligence Synced!")
 
-    # Display results if they exist in session state
-    if 'linkedin_jobs' in st.session_state or 'naukri_jobs' in st.session_state:
-        tab_l, tab_n = st.tabs(["LinkedIn Opportunities", "Naukri (India)"])
+    # Display Jobs in Tabs
+    if st.session_state.linkedin_jobs or st.session_state.naukri_jobs:
+        tab_l, tab_n = st.tabs(["LinkedIn Matches", "Naukri (India)"])
 
         with tab_l:
-            jobs = st.session_state.get('linkedin_jobs', [])
-            if jobs:
-                for job in jobs:
-                    st.markdown(f"""
-                        <div class="job-card" style="border-left: 5px solid #0077b5;">
-                            <h4 style="margin:0;">{job.get('title', 'Unknown Title')}</h4>
-                            <p style="margin:5px 0; color:#8b949e;">🏢 <b>{job.get('companyName', 'N/A')}</b> | 📍 {job.get('location', 'Remote')}</p>
-                            <a href="{job.get('link', '#')}" target="_blank" style="color:#58a6ff; text-decoration:none; font-weight:bold;">Apply on LinkedIn →</a>
-                        </div>
-                    """, unsafe_allow_html=True)
-            else:
-                st.info("No active LinkedIn matches found for these keywords.")
+            for job in st.session_state.linkedin_jobs:
+                st.markdown(f"""
+                    <div class="job-card" style="border-left: 5px solid #0077b5;">
+                        <h4 style="margin:0;">{job.get('title', 'Role')}</h4>
+                        <p style="margin:5px 0; color:#8b949e;">🏢 <b>{job.get('companyName', 'N/A')}</b> | 📍 {job.get('location', 'Remote')}</p>
+                        <a href="{job.get('link', '#')}" target="_blank" rel="noopener noreferrer" style="color:#58a6ff; text-decoration:none; font-weight:bold;">Apply on LinkedIn →</a>
+                    </div>
+                """, unsafe_allow_html=True)
 
         with tab_n:
-            jobs = st.session_state.get('naukri_jobs', [])
-            if jobs:
-                for job in jobs:
-                    st.markdown(f"""
-                        <div class="job-card" style="border-left: 5px solid #4a90e2;">
-                            <h4 style="margin:0;">{job.get('title', 'Unknown Title')}</h4>
-                            <p style="margin:5px 0; color:#8b949e;">🏢 <b>{job.get('companyName', 'N/A')}</b> | 📍 {job.get('location', 'India')}</p>
-                            <a href="{job.get('url', '#')}" target="_blank" style="color:#58a6ff; text-decoration:none; font-weight:bold;">Apply on Naukri →</a>
-                        </div>
-                    """, unsafe_allow_html=True)
-            else:
-                st.info("No active Naukri matches found.")
-
+            for job in st.session_state.naukri_jobs:
+                st.markdown(f"""
+                    <div class="job-card" style="border-left: 5px solid #4a90e2;">
+                        <h4 style="margin:0;">{job.get('title', 'Role')}</h4>
+                        <p style="margin:5px 0; color:#8b949e;">🏢 <b>{job.get('companyName', 'N/A')}</b> | 📍 {job.get('location', 'India')}</p>
+                        <a href="{job.get('url', '#')}" target="_blank" rel="noopener noreferrer" style="color:#58a6ff; text-decoration:none; font-weight:bold;">Apply on Naukri →</a>
+                    </div>
+                """, unsafe_allow_html=True)
 else:
-    # Landing Page State
+    # Landing View
     st.markdown("---")
     c1, c2, c3 = st.columns([1, 2, 1])
     with c2:
         st.image("https://img.icons8.com/fluency/240/radar.png", width=120)
-        st.markdown("### Welcome to the Future of Job Hunting")
-        st.write("Upload your resume to generate a gap analysis and live job feed.")
+        st.markdown("### Ready to find your next move?")
+        st.write("Upload your resume and let the AI Radar scan the 2026 job market for you.")
